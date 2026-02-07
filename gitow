@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+OLD_NAME=""
+OLD_EMAIL=""
+NEW_NAME=""
+NEW_EMAIL=""
+SEARCH_NAME=""
+SEARCH_EMAIL=""
+SEARCH_MODE=false
+DEEP_SEARCH=false
+EDIT_MODE=false
+DEBUG=false
+
+show_help() {
+cat << 'EOF'
+gitow - Git Overwrite
+
+USAGE:
+    gitow edit -on "name" -oe "email" -nn "newname" -ne "newemail"
+    
+    gitow search [--deep]
+    gitow search -n "name" -e "email"
+
+COMMANDS:
+    edit          Rewrite commit author/email
+    search        List all unique users (name + email combinations)
+    search --deep List all unique users with their commit hashes
+    search -n -e  List all commits by specific user
+
+OPTIONS:
+    -on           Old author name to match
+    -oe           Old author email to match
+    -nn           New author name
+    -ne           New author email
+    -n            Search for author name
+    -e            Search for author email
+    --debug       Show git output
+    --help        Show this help message
+
+WARNING: This rewrites git history permanently. No backups are created.
+
+EOF
+}
+
+search_users() {
+    if [[ ! -d ".git" ]]; then
+        echo "Error: Not a git repository (no .git directory found)" >&2
+        exit 1
+    fi
+    
+    if [[ -n "$SEARCH_NAME" ]] && [[ -n "$SEARCH_EMAIL" ]]; then
+        echo "Commits by: $SEARCH_NAME <$SEARCH_EMAIL>"
+        echo ""
+        git log --all --author="$SEARCH_NAME" --pretty=format:"%H|%an|%ae|%s" | \
+            grep "|${SEARCH_NAME}|${SEARCH_EMAIL}|" | \
+            awk -F'|' '{ print $1 " - " $4 }'
+        echo ""
+        return
+    fi
+    
+    if [[ "$DEEP_SEARCH" == true ]]; then
+        echo "Unique users with commits:"
+        echo ""
+        
+        git log --all --pretty=format:"%an|%ae|%H" | awk -F'|' '
+        {
+            key = $1 "|" $2
+            commits[key] = commits[key] (commits[key] ? "," : "") $3
+            if (!(key in seen)) {
+                names[key] = $1
+                emails[key] = $2
+                seen[key] = 1
+                order[++count] = key
+            }
+        }
+        END {
+            for (i = 1; i <= count; i++) {
+                key = order[i]
+                print names[key] " <" emails[key] ">"
+                split(commits[key], arr, ",")
+                for (j in arr) {
+                    print "  " arr[j]
+                }
+                print ""
+            }
+        }'
+    else
+        echo "Unique users:"
+        echo ""
+        git log --all --pretty=format:"%an <%ae>" | sort -u
+        echo ""
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        edit)
+            EDIT_MODE=true
+            shift
+            ;;
+        search)
+            SEARCH_MODE=true
+            shift
+            ;;
+        --deep)
+            DEEP_SEARCH=true
+            shift
+            ;;
+        --debug)
+            DEBUG=true
+            shift
+            ;;
+        --help)
+            show_help
+            exit 0
+            ;;
+        -on)
+            OLD_NAME="$2"
+            shift 2
+            ;;
+        -oe)
+            OLD_EMAIL="$2"
+            shift 2
+            ;;
+        -nn)
+            NEW_NAME="$2"
+            shift 2
+            ;;
+        -ne)
+            NEW_EMAIL="$2"
+            shift 2
+            ;;
+        -n)
+            SEARCH_NAME="$2"
+            shift 2
+            ;;
+        -e)
+            SEARCH_EMAIL="$2"
+            shift 2
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            echo "Use 'gitow --help' for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "$SEARCH_MODE" == true ]]; then
+    search_users
+    exit 0
+fi
+
+if [[ "$EDIT_MODE" != true ]]; then
+    echo "Error: Command required (edit or search)" >&2
+    echo "Use 'gitow --help' for usage information"
+    exit 1
+fi
+
+if [[ -z "$OLD_NAME" ]] || [[ -z "$OLD_EMAIL" ]] || [[ -z "$NEW_NAME" ]] || [[ -z "$NEW_EMAIL" ]]; then
+    echo "Error: All arguments are required (-on, -oe, -nn, -ne)" >&2
+    echo "Use 'gitow --help' for usage information"
+    exit 1
+fi
+
+if [[ ! -d ".git" ]]; then
+    echo "Error: Not a git repository (no .git directory found)" >&2
+    exit 1
+fi
+
+count=$(git log --all --pretty=format:"%an|%ae" | grep -c "^${OLD_NAME}|${OLD_EMAIL}$" || echo "0")
+
+if [[ "$count" -eq 0 ]]; then
+    echo "No commits found for: $OLD_NAME <$OLD_EMAIL>"
+    exit 0
+fi
+
+echo "Overwriting $count commit(s) by: $OLD_NAME <$OLD_EMAIL>"
+echo "Changing to: $NEW_NAME <$NEW_EMAIL>"
+
+if [[ "$DEBUG" == true ]]; then
+    FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --env-filter "
+if [ \"\$GIT_AUTHOR_NAME\" = '$OLD_NAME' ] && [ \"\$GIT_AUTHOR_EMAIL\" = '$OLD_EMAIL' ]; then
+    export GIT_AUTHOR_NAME='$NEW_NAME'
+    export GIT_AUTHOR_EMAIL='$NEW_EMAIL'
+    export GIT_COMMITTER_NAME='$NEW_NAME'
+    export GIT_COMMITTER_EMAIL='$NEW_EMAIL'
+fi
+" -- --all
+else
+    FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --env-filter "
+if [ \"\$GIT_AUTHOR_NAME\" = '$OLD_NAME' ] && [ \"\$GIT_AUTHOR_EMAIL\" = '$OLD_EMAIL' ]; then
+    export GIT_AUTHOR_NAME='$NEW_NAME'
+    export GIT_AUTHOR_EMAIL='$NEW_EMAIL'
+    export GIT_COMMITTER_NAME='$NEW_NAME'
+    export GIT_COMMITTER_EMAIL='$NEW_EMAIL'
+fi
+" -- --all >/dev/null 2>&1
+fi
+
+echo "Done!"
